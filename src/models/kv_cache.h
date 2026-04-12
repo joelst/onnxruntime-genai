@@ -104,11 +104,10 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::vector<std::array<int64_t, 4>> layer_shapes_;
 
   std::unique_ptr<OrtValue> empty_past_;
+  std::vector<std::unique_ptr<OrtValue>> empty_pasts_;  // Per-layer empty pasts for models with variable head sizes (e.g. Gemma 4)
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
-};
-
-// Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
+};, but is only created once at the encoder step, then used without modification for every decoder step
 struct CrossCache {
   CrossCache(State& state, int sequence_length);
 

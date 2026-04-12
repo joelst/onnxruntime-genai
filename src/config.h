@@ -301,6 +301,10 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
+      int global_head_size{};           // For full-attention layers in models with variable head sizes (e.g. Gemma 4)
+      std::vector<int> attention_pattern;  // Per-layer attention type: 0=sliding/local, 1=full/global (e.g. Gemma 4)
+      int num_kv_shared_layers{};       // Layers 0..num_kv_shared_layers-1 share KV caches with later layers (e.g. Gemma 4)
+      int hidden_size_per_layer_input{};   // Size of per-layer embedding input slice (e.g. Gemma 4 PLE)
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt

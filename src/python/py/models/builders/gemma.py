@@ -158,3 +158,112 @@ class Gemma3Model(Gemma2Model):
             "sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name
         )
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
+
+
+class Gemma4Model(Gemma3Model):
+    """
+    Model builder for Gemma 4, which extends Gemma 3 with three new architectural features:
+
+    1. Per-Layer Embeddings (PLE): the embed model produces a ``per_layer_inputs`` tensor of shape
+       ``[batch, seq, num_hidden_layers, hidden_size_per_layer_input]`` that is fed as an additional
+       decoder input.
+    2. Variable attention head dimensions: sliding-window layers use ``head_dim`` (e.g. 256) while
+       full-attention layers (every 5th layer by default) use ``global_head_dim`` (e.g. 512).
+    3. KV cache sharing: the first ``num_kv_shared_layers`` decoder layers share KV caches with the
+       last ``num_hidden_layers - num_kv_shared_layers`` unique layers (accessed via modulo mapping).
+    """
+
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Variable head dimensions per layer
+        self.global_head_size = getattr(config, "global_head_dim", self.head_size)
+
+        # Per-layer attention pattern: 0 = sliding/local, 1 = full/global
+        self.attention_pattern = list(getattr(config, "attention_pattern", []))
+
+        # KV cache sharing
+        self.num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        self.num_unique_kv = max(1, self.num_layers - self.num_kv_shared_layers)
+
+        # Per-layer embeddings (PLE)
+        self.hidden_size_per_layer_input = getattr(config, "hidden_size_per_layer_input", 0)
+
+        # Remap KV cache tensor names to shared indices
+        if self.num_kv_shared_layers > 0:
+            for i in range(self.num_layers):
+                cache_id = self._get_kv_cache_id(i)
+                self.input_names["past_key_values.key"][i] = f"past_key_values.{cache_id}.key"
+                self.input_names["past_key_values.value"][i] = f"past_key_values.{cache_id}.value"
+                self.output_names["present.key"][i] = f"present.{cache_id}.key"
+                self.output_names["present.value"][i] = f"present.{cache_id}.value"
+
+        # Register per_layer_inputs as an additional model input when PLE is used
+        if self.hidden_size_per_layer_input > 0:
+            self.input_names["per_layer_inputs"] = "per_layer_inputs"
+            self.input_types["per_layer_inputs"] = self.io_dtype
+            self.input_shapes["per_layer_inputs"] = [
+                "batch_size",
+                "sequence_length",
+                self.num_layers,
+                self.hidden_size_per_layer_input,
+            ]
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _get_kv_cache_id(self, layer_id):
+        """Map a layer index to its KV cache index, accounting for sharing."""
+        return layer_id % self.num_unique_kv
+
+    def is_local(self, layer_id):
+        """Return True for sliding/local attention layers using the per-layer attention pattern."""
+        if self.attention_pattern:
+            return self.attention_pattern[layer_id] == 0  # 0=sliding, 1=full
+        return super().is_local(layer_id)
+
+    # ------------------------------------------------------------------
+    # Attention with per-layer head size
+    # ------------------------------------------------------------------
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        """Switch head_size for full-attention layers before building the attention subgraph."""
+        is_full_attn = bool(self.attention_pattern) and not self.is_local(layer_id)
+        if is_full_attn and self.global_head_size != self.head_size:
+            original_head_size = self.head_size
+            self.head_size = self.global_head_size
+            try:
+                super().make_attention(layer_id, attention, root_input, **kwargs)
+            finally:
+                self.head_size = original_head_size
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    # ------------------------------------------------------------------
+    # genai_config.json emission
+    # ------------------------------------------------------------------
+
+    def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        super().make_genai_config(model_name_or_path, extra_kwargs, out_dir)
+
+        # Append Gemma 4-specific fields to the already-written config
+        import json
+        import os
+
+        config_path = os.path.join(out_dir, "genai_config.json")
+        with open(config_path) as f:
+            genai_config = json.load(f)
+
+        decoder = genai_config["model"]["decoder"]
+        if self.global_head_size and self.global_head_size != self.head_size:
+            decoder["global_head_size"] = self.global_head_size
+        if self.attention_pattern:
+            decoder["attention_pattern"] = self.attention_pattern
+        if self.num_kv_shared_layers > 0:
+            decoder["num_kv_shared_layers"] = self.num_kv_shared_layers
+        if self.hidden_size_per_layer_input > 0:
+            decoder["hidden_size_per_layer_input"] = self.hidden_size_per_layer_input
+
+        with open(config_path, "w") as f:
+            json.dump(genai_config, f, indent=4)

@@ -253,6 +253,47 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     shape_[2] = state_.params_->search.max_length;
   }
 
+  // For models with variable head sizes per layer (e.g. Gemma 4 with sliding and full attention),
+  // extend layer_shapes_ to carry the per-layer head_size.
+  const int global_head_size = model_.config_->model.decoder.global_head_size;
+  const auto& attention_pattern = model_.config_->model.decoder.attention_pattern;
+  if (global_head_size > 0 && !attention_pattern.empty()) {
+    if (layer_shapes_.empty()) {
+      // No sliding-window layer_shapes_ yet — initialise all layers with the base shape.
+      layer_shapes_.resize(layer_count_);
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i] = shape_;
+      }
+    }
+
+    // Build model-layer-index → cache-slot mapping (supports sparse KV layouts).
+    std::unordered_map<int, int> model_layer_to_slot;
+    for (int slot = 0; slot < layer_count_; ++slot) {
+      int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
+      model_layer_to_slot[model_idx] = slot;
+    }
+
+    // Override head_size for full-attention layers (attention_pattern[i] == 1).
+    for (int model_layer_idx = 0; model_layer_idx < static_cast<int>(attention_pattern.size()); ++model_layer_idx) {
+      if (attention_pattern[model_layer_idx] == 1) {
+        auto it = model_layer_to_slot.find(model_layer_idx);
+        if (it != model_layer_to_slot.end()) {
+          layer_shapes_[it->second][3] = static_cast<int64_t>(global_head_size);
+        }
+      }
+    }
+  }
+
+  // Create per-layer empty pasts when layer shapes have variable head sizes.
+  if (!layer_shapes_.empty()) {
+    empty_pasts_.reserve(layer_count_);
+    for (int i = 0; i < layer_count_; ++i) {
+      auto empty_shape = layer_shapes_[i];
+      empty_shape[2] = 0;  // sequence length = 0 for the initial empty past
+      empty_pasts_.push_back(OrtValue::CreateTensor(Allocator(), empty_shape, type_));
+    }
+  }
+
   try {
     // Allocate KV cache tensors - 2 per layer (key and value)
     // For per-layer shapes: alternates between key and value for each layer
@@ -286,7 +327,8 @@ void DefaultKeyValueCache::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    OrtValue* initial_past = empty_pasts_.empty() ? empty_past_.get() : empty_pasts_[i / 2].get();
+    state_.inputs_.push_back(initial_past);  // Set empty past here, Update() takes care of the rest
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -354,7 +396,7 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      state_.inputs_[input_index_ + i] = empty_past_.get();
+      state_.inputs_[input_index_ + i] = empty_pasts_.empty() ? empty_past_.get() : empty_pasts_[i / 2].get();
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);
