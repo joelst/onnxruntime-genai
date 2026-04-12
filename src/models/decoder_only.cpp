@@ -118,7 +118,8 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   }
 
   position_inputs_->Update(next_tokens, position_length, static_cast<int>(new_length));
-  per_layer_inputs_.Update(static_cast<int>(new_length));
+  if (per_layer_inputs_.IsActive())
+    per_layer_inputs_.Update(static_cast<int>(new_length));
   if (kv_cache_)
     kv_cache_->Update(beam_indices, kv_cache_length);
   if (recurrent_state_)

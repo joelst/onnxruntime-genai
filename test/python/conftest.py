@@ -2,7 +2,10 @@
 # Licensed under the MIT License
 
 import functools
+import json
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -101,3 +104,42 @@ def nemotron_speech_model_path(request):
 @pytest.fixture
 def test_data_path(request):
     return request.config.getoption("--test_models")
+
+
+_GEMMA4_MODEL_DIR_NAME = "gemma4-kv-sharing-preprocessing"
+
+
+@pytest.fixture
+def gemma4_model_path(test_data_path):
+    path = os.fspath(Path(test_data_path) / _GEMMA4_MODEL_DIR_NAME)
+    if not os.path.exists(path):
+        pytest.skip(f"Gemma 4 test model not found at {path}")
+    return path
+
+
+@pytest.fixture
+def gemma4_vlm_path(test_data_path, tmp_path):
+    """
+    Create a minimal genai_config.json with type='gemma4' (not 'gemma4_text') so that
+    the C++ runtime tries to create a MultiModalProcessor for it.
+    """
+    try:
+        import onnxruntime_genai as og  # noqa: F401 — just check it's available
+    except ImportError:
+        pytest.skip("onnxruntime_genai not installed")
+
+    src = Path(test_data_path) / _GEMMA4_MODEL_DIR_NAME
+    if not src.exists():
+        pytest.skip(f"Gemma 4 test model not found at {src}")
+
+    dest = tmp_path / "gemma4-vlm"
+    shutil.copytree(src, dest)
+
+    config_path = dest / "genai_config.json"
+    with open(config_path) as f:
+        cfg = json.load(f)
+    cfg["model"]["type"] = "gemma4"
+    with open(config_path, "w") as f:
+        json.dump(cfg, f)
+
+    return os.fspath(dest)
