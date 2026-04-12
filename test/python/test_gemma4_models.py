@@ -77,30 +77,6 @@ def _make_gemma4_config(
     return cfg
 
 
-def _instantiate_gemma4_model(cfg, *, ep="cpu"):
-    """Instantiate a Gemma4Model with dummy arguments (no real model files)."""
-    # Import here so we don't fail at module load time if transformers/torch not available
-    try:
-        from onnxruntime_genai.models.builders.gemma import Gemma4Model
-    except ImportError:
-        from src.python.py.models.builders.gemma import Gemma4Model  # source tree
-
-    import tempfile
-    # We only test the sliding_window.layers logic in make_genai_config — not the full ONNX export.
-    # Patch out the parent make_genai_config so we can call just the Gemma4 override.
-    with tempfile.TemporaryDirectory() as tmp:
-        # Write a minimal genai_config.json so the base class file-read succeeds
-        genai_cfg = {
-            "model": {
-                "type": "gemma4_text",
-                "decoder": {},
-            }
-        }
-        with open(os.path.join(tmp, "genai_config.json"), "w") as f:
-            json.dump(genai_cfg, f)
-        return tmp  # caller writes its own stubs
-
-
 def _compute_safe_sliding_slots(
     num_layers: int,
     num_kv_shared_layers: int,
