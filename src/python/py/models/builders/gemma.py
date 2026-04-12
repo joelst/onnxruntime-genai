@@ -275,7 +275,23 @@ class Gemma4Model(Gemma3Model):
         # where ~80 % of layers are sliding-window.
         if self.ep != "trt-rtx" and self.attention_pattern and self.window_size:
             if "sliding_window" not in decoder:
-                sliding_layer_idxs = [i for i in range(self.num_layers) if self.is_local(i)]
+                if self.num_kv_shared_layers > 0:
+                    # With KV cache sharing (layer i → slot i % num_unique_kv), a single cache slot
+                    # may be shared by both a sliding-window layer *and* a full-attention layer.  Such
+                    # a shared slot must be allocated at max_length (the larger of the two requirements).
+                    # Only constrain a slot when *every* model layer that maps to it is a local/sliding
+                    # layer; that is, the slot is exclusively local.
+                    slot_users: dict = {}
+                    for layer_idx in range(self.num_layers):
+                        slot = self._get_kv_cache_id(layer_idx)
+                        slot_users.setdefault(slot, []).append(layer_idx)
+                    sliding_layer_idxs = [
+                        slot
+                        for slot in range(self.num_unique_kv)
+                        if slot_users.get(slot) and all(self.is_local(layer) for layer in slot_users[slot])
+                    ]
+                else:
+                    sliding_layer_idxs = [i for i in range(self.num_layers) if self.is_local(i)]
                 decoder["sliding_window"] = {
                     "window_size": self.window_size,
                     "slide_key_value_cache": False,

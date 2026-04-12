@@ -120,9 +120,16 @@ void PerLayerInputs::Update(int seq_length) {
                               static_cast<size_t>(shape_[2]) * static_cast<size_t>(shape_[3]);
   const size_t num_bytes = num_elements * Ort::SizeOf(type_);
   std::memset(tensor_->GetTensorMutableRawData(), 0, num_bytes);
-  std::memset(tensor_->GetTensorMutableRawData(), 0, num_bytes);
 
   state_.inputs_[index_] = tensor_.get();
+}
+
+void PerLayerInputs::RewindTo(int seq_length) {
+  if (!is_active_) return;
+  // Reallocate and zero-initialise the tensor to the rewound sequence length so that
+  // the state is consistent immediately after a rewind (rather than waiting for the
+  // next Update() call to replace the stale tensor).
+  Update(seq_length);
 }
 
 }  // namespace Generators

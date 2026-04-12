@@ -39,6 +39,9 @@ struct PerLayerInputs {
   // Resize the tensor to match the new sequence length and zero-initialise it.
   void Update(int seq_length);
 
+  // Reset to a rewound sequence length; identical to Update() but communicates intent at call sites.
+  void RewindTo(int seq_length);
+
  private:
   Ort::Allocator& Allocator() { return model_.allocator_cpu_; }
 

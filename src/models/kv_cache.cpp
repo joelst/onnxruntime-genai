@@ -244,6 +244,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
           layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+        } else if (g_log.enabled && g_log.warning) {
+          Log("warning", "sliding_window.layers contains index " + std::to_string(model_layer_idx) +
+                             " which has no corresponding KV cache slot; it will be ignored.");
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
@@ -256,44 +259,28 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     shape_[2] = state_.params_->search.max_length;
   }
 
-  // For models with variable head sizes per layer (e.g. Gemma 4 with sliding and full attention),
-  // extend layer_shapes_ to carry the per-layer head_size.
+  // For models with variable head sizes per layer (e.g. Gemma 4 with sliding-window and full-attention
+  // layers using different head dimensions), read the actual KV head_size for each cache slot directly
+  // from the ONNX session info.  This is more robust than inferring head sizes from `attention_pattern`
+  // + `global_head_size` because it correctly handles KV-cache sharing across layers with different
+  // attention types (where a model-layer-index lookup via attention_pattern can miss shared slots
+  // whose model-layer index is ≥ num_unique_kv).
   const int global_head_size = model_.config_->model.decoder.global_head_size;
-  const auto& attention_pattern = model_.config_->model.decoder.attention_pattern;
-  if (global_head_size > 0 && !attention_pattern.empty()) {
+  if (global_head_size > 0) {
     if (layer_shapes_.empty()) {
-      // No sliding-window layer_shapes_ yet — initialise all layers with the base shape.
+      // No sliding-window layer_shapes_ yet — initialise all slots with the base shape.
       layer_shapes_.resize(layer_count_);
       for (int i = 0; i < layer_count_; ++i) {
         layer_shapes_[i] = shape_;
       }
     }
-
-    // Override head_size for full-attention layers (attention_pattern[i] == 1).
-    // Only build the model-layer → cache-slot map when there is at least one full-attention layer.
-    const bool has_full_attn = std::any_of(attention_pattern.begin(), attention_pattern.end(),
-                                           [](int val) { return val == 1; });
-    if (has_full_attn) {
-      std::unordered_map<int, int> model_layer_to_slot;
-      if (!kv_layer_indices_.empty()) {
-        for (int slot = 0; slot < layer_count_; ++slot) {
-          model_layer_to_slot[kv_layer_indices_[slot]] = slot;
-        }
-      }
-      for (int model_layer_idx = 0; model_layer_idx < static_cast<int>(attention_pattern.size()); ++model_layer_idx) {
-        if (attention_pattern[model_layer_idx] == 1) {
-          if (kv_layer_indices_.empty()) {
-            // Sequential layout: model layer index == cache slot index
-            if (model_layer_idx < layer_count_) {
-              layer_shapes_[model_layer_idx][3] = static_cast<int64_t>(global_head_size);
-            }
-          } else {
-            auto it = model_layer_to_slot.find(model_layer_idx);
-            if (it != model_layer_to_slot.end()) {
-              layer_shapes_[it->second][3] = static_cast<int64_t>(global_head_size);
-            }
-          }
-        }
+    // input_name_strings_ interleaves key and value tensors: [key0, val0, key1, val1, ...]
+    // KV tensor shape is [batch, num_kv_heads, seq_len, head_size]; head_size is at index 3.
+    for (int slot = 0; slot < layer_count_; ++slot) {
+      const auto& key_name = input_name_strings_[static_cast<size_t>(slot) * 2];
+      const auto slot_shape = model_.session_info_.GetInputShape(key_name);
+      if (slot_shape.size() == 4 && slot_shape[3] > 0) {
+        layer_shapes_[slot][3] = slot_shape[3];
       }
     }
   }

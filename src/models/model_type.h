@@ -21,7 +21,7 @@ struct ModelType {
 
   inline static bool IsVLM(const std::string& model_type) {
     // Vision-language model (VLM)
-    static constexpr std::array<std::string_view, 6> VLM = {"fara", "gemma3", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
+    static constexpr std::array<std::string_view, 7> VLM = {"fara", "gemma3", "gemma4", "phi3v", "qwen2_5_vl", "qwen3_vl", "qwen3_5"};
     return std::find(VLM.begin(), VLM.end(), model_type) != VLM.end();
   }
 

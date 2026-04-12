@@ -90,6 +90,8 @@ void DecoderOnly_State::RewindTo(size_t index) {
     kv_cache_->RewindTo(index);
   if (recurrent_state_)
     recurrent_state_->RewindTo(index);
+  if (per_layer_inputs_.IsActive())
+    per_layer_inputs_.RewindTo(static_cast<int>(index));
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
