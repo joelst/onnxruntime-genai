@@ -39,7 +39,7 @@ The tool currently supports the following model architectures.
 - ChatGLM
 - DeepSeek
 - ERNIE 4.5
-- Gemma
+- Gemma (1, 2, 3, 4)
 - gpt-oss
 - Granite
 - InternLM2

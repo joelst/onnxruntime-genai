@@ -17,6 +17,7 @@ This document explains how the model builder is designed and how new contributio
   - [Namespaces](#namespaces)
   - [Constants](#constants)
 - [Contributing](#contributing)
+- [Gemma 4 Architecture Notes](#gemma-4-architecture-notes)
 
 ## Design Principles
 
@@ -165,3 +166,62 @@ To contribute to the model builder, please ensure the following requirements are
 4. For adding new classes of model architectures (e.g. encoder-decoder, diffusion pipelines, multi-modal), please create a separate file that defines the new architecture class and have the base class in the new file inherit the `Model` class. While decoder-only architectures are currently the only ones supported, some of the logic in `Model` may be re-factored and put into a `DecoderModel` class in the future to help with this.
 
 Please feel free to open an issue if you have any questions!
+
+## Gemma 4 Architecture Notes
+
+Gemma 4 (`Gemma4ForConditionalGeneration`) introduces three features not present in earlier Gemma
+variants, each of which required corresponding changes in both the Python builder and the C++
+runtime:
+
+### 1. KV Cache Sharing (`num_kv_shared_layers`)
+
+The first `num_kv_shared_layers` decoder layers share their KV cache slots with the last
+`num_hidden_layers - num_kv_shared_layers` unique layers via modulo mapping:
+
+```
+cache_slot = layer_index % num_unique_kv   (where num_unique_kv = num_layers - num_kv_shared_layers)
+```
+
+**Impact on `sliding_window.layers` (genai_config.json)**
+
+The `sliding_window.layers` list specifies which KV cache *slot* indices should be allocated at
+`window_size` tokens rather than `max_length` tokens, saving significant memory.  A slot is only
+safe to constrain when **every** model layer that maps to it is a local/sliding-window layer.  If
+any layer sharing the slot uses full/global attention, the slot must retain `max_length` capacity.
+
+The builder (`Gemma4Model.make_genai_config`) computes this by:
+
+1. Building a `slot → [layer indices]` map.
+2. Including slot `s` only if all layers in `slot_users[s]` satisfy `is_local(layer) == True`.
+
+**Impact on the C++ runtime (`kv_cache.cpp`)**
+
+`kv_layer_indices_` only covers indices `0..num_unique_kv-1`.  The previous implementation
+inferred per-slot head sizes from `attention_pattern`, looking up each global model-layer index
+in a map built from `kv_layer_indices_`.  For global layers with index ≥ `num_unique_kv` the
+lookup silently failed and the shared slot retained the smaller local head size.
+
+The fix reads the actual `head_size` for each slot directly from `session_info_.GetInputShape()`,
+which is both correct and architecture-agnostic.
+
+### 2. Variable Head Dimensions (`global_head_size`)
+
+Sliding-window layers use the standard `head_size` (e.g. 256) while full-attention layers use a
+larger `global_head_size` (e.g. 512).  The builder writes both values to `genai_config.json`; the
+runtime reads the per-slot shape from the ONNX model to allocate each KV tensor correctly.
+
+### 3. Per-Layer Embeddings (`hidden_size_per_layer_input`)
+
+The decoder accepts an additional `per_layer_inputs` tensor of shape
+`[batch, seq_len, num_hidden_layers, hidden_size_per_layer_input]`.  The builder registers this
+input if `hidden_size_per_layer_input > 0`.  The C++ runtime (`PerLayerInputs` in
+`extra_inputs.cpp`) zero-initialises the tensor until a dedicated embed pipeline stage is wired up.
+
+`PerLayerInputs::RewindTo` is called from `DecoderOnly_State::RewindTo` to keep the tensor
+consistent immediately after a rewind, rather than waiting for the next `Update()` call.
+
+### 4. VLM Registration (`"gemma4"`)
+
+The full multimodal model type `"gemma4"` (`Gemma4ForConditionalGeneration`) is registered in
+`model_type.h` as a VLM and in `model.cpp` with `GemmaImageProcessor`, mirroring the `"gemma3"`
+registration.  The text-only variant exported by the builder uses the type `"gemma4_text"`.
