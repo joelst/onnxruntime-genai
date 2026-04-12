@@ -176,8 +176,12 @@ class Gemma4Model(Gemma3Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Variable head dimensions per layer
-        self.global_head_size = getattr(config, "global_head_dim", self.head_size)
+        # Variable head dimensions per layer (HuggingFace uses 'global_head_dim', C++ config uses 'global_head_size')
+        self.global_head_size = (
+            getattr(config, "global_head_dim", None)
+            or getattr(config, "global_head_size", None)
+            or self.head_size
+        )
 
         # Per-layer attention pattern: 0 = sliding/local, 1 = full/global
         self.attention_pattern = list(getattr(config, "attention_pattern", []))

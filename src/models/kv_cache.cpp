@@ -266,19 +266,24 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       }
     }
 
-    // Build model-layer-index → cache-slot mapping (supports sparse KV layouts).
-    std::unordered_map<int, int> model_layer_to_slot;
-    for (int slot = 0; slot < layer_count_; ++slot) {
-      int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
-      model_layer_to_slot[model_idx] = slot;
-    }
-
     // Override head_size for full-attention layers (attention_pattern[i] == 1).
-    for (int model_layer_idx = 0; model_layer_idx < static_cast<int>(attention_pattern.size()); ++model_layer_idx) {
-      if (attention_pattern[model_layer_idx] == 1) {
-        auto it = model_layer_to_slot.find(model_layer_idx);
-        if (it != model_layer_to_slot.end()) {
-          layer_shapes_[it->second][3] = static_cast<int64_t>(global_head_size);
+    // Only build the model-layer → cache-slot map when there is at least one full-attention layer.
+    bool has_full_attn = false;
+    for (int val : attention_pattern) {
+      if (val == 1) { has_full_attn = true; break; }
+    }
+    if (has_full_attn) {
+      std::unordered_map<int, int> model_layer_to_slot;
+      for (int slot = 0; slot < layer_count_; ++slot) {
+        int model_idx = kv_layer_indices_.empty() ? slot : kv_layer_indices_[slot];
+        model_layer_to_slot[model_idx] = slot;
+      }
+      for (int model_layer_idx = 0; model_layer_idx < static_cast<int>(attention_pattern.size()); ++model_layer_idx) {
+        if (attention_pattern[model_layer_idx] == 1) {
+          auto it = model_layer_to_slot.find(model_layer_idx);
+          if (it != model_layer_to_slot.end()) {
+            layer_shapes_[it->second][3] = static_cast<int64_t>(global_head_size);
+          }
         }
       }
     }
