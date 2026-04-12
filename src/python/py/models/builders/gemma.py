@@ -273,7 +273,7 @@ class Gemma4Model(Gemma3Model):
         # the C++ runtime can apply per-layer KV cache size constraints (sliding layers → window_size
         # tokens; full-attention layers → max_length tokens), saving significant memory for Gemma 4
         # where ~80 % of layers are sliding-window.
-        if self.ep != "trt-rtx" and self.attention_pattern and self.window_size and self.window_size > 0:
+        if self.ep != "trt-rtx" and self.attention_pattern and self.window_size:
             if "sliding_window" not in decoder:
                 sliding_layer_idxs = [i for i in range(self.num_layers) if self.is_local(i)]
                 decoder["sliding_window"] = {

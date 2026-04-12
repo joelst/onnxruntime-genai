@@ -115,9 +115,11 @@ void PerLayerInputs::Update(int seq_length) {
   // Zero-initialise the tensor.  The actual per-layer embeddings will come from a dedicated
   // embed model once that pipeline stage is wired up; until then zeros are safe because no
   // ONNX node in the current decoder graph consumes this input.
-  const size_t num_bytes = static_cast<size_t>(shape_[0]) * static_cast<size_t>(shape_[1]) *
-                           static_cast<size_t>(shape_[2]) * static_cast<size_t>(shape_[3]) *
-                           Ort::SizeOf(type_);
+  // Use size_t for all multiplications to avoid 32-bit intermediate overflow.
+  const size_t num_elements = static_cast<size_t>(shape_[0]) * static_cast<size_t>(shape_[1]) *
+                              static_cast<size_t>(shape_[2]) * static_cast<size_t>(shape_[3]);
+  const size_t num_bytes = num_elements * Ort::SizeOf(type_);
+  std::memset(tensor_->GetTensorMutableRawData(), 0, num_bytes);
   std::memset(tensor_->GetTensorMutableRawData(), 0, num_bytes);
 
   state_.inputs_[index_] = tensor_.get();
