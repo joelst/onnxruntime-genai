@@ -269,5 +269,19 @@ class Gemma4Model(Gemma3Model):
         if self.hidden_size_per_layer_input > 0:
             decoder["hidden_size_per_layer_input"] = self.hidden_size_per_layer_input
 
+        # For non-TRT EPs, the base class does not write a sliding_window config. Add it here so that
+        # the C++ runtime can apply per-layer KV cache size constraints (sliding layers → window_size
+        # tokens; full-attention layers → max_length tokens), saving significant memory for Gemma 4
+        # where ~80 % of layers are sliding-window.
+        if self.ep != "trt-rtx" and self.attention_pattern and self.window_size and self.window_size > 0:
+            if "sliding_window" not in decoder:
+                sliding_layer_idxs = [i for i in range(self.num_layers) if self.is_local(i)]
+                decoder["sliding_window"] = {
+                    "window_size": self.window_size,
+                    "slide_key_value_cache": False,
+                    "slide_inputs": False,
+                    "layers": sliding_layer_idxs,
+                }
+
         with open(config_path, "w") as f:
             json.dump(genai_config, f, indent=4)

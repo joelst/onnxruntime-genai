@@ -213,7 +213,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
+  // Apply per-layer KV cache allocation for all backends when sliding_window config is present with per-layer layer list.
+  // (Previously gated to NvTensorRtRtx only; now extended to CPU/CUDA so that sliding-window layers don't
+  // over-allocate max_length tokens — a significant memory saving for models like Gemma 4.)
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     const int max_length = state_.params_->search.max_length;
