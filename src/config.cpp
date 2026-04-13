@@ -592,6 +592,12 @@ struct Decoder_Element : JSON::Element {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "global_head_size") {
+      v_.global_head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_kv_shared_layers") {
+      v_.num_kv_shared_layers = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "hidden_size_per_layer_input") {
+      v_.hidden_size_per_layer_input = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -628,6 +634,9 @@ struct Decoder_Element : JSON::Element {
     if (name == "pipeline") {
       return pipeline_;
     }
+    if (name == "attention_pattern") {
+      return attention_pattern_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -640,6 +649,7 @@ struct Decoder_Element : JSON::Element {
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
   std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
+  IntArray_Element attention_pattern_{v_.attention_pattern};
 };
 
 struct VisionInputs_Element : JSON::Element {

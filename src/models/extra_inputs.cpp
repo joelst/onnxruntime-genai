@@ -60,4 +60,76 @@ void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::ve
   registrar_.Add();
 }
 
+// ---------------------------------------------------------------------------
+// PerLayerInputs
+// ---------------------------------------------------------------------------
+
+PerLayerInputs::PerLayerInputs(State& state)
+    : state_{state} {
+  const int hidden_size_per_layer = model_.config_->model.decoder.hidden_size_per_layer_input;
+  if (hidden_size_per_layer <= 0) {
+    return;
+  }
+
+  // Check whether the model session actually exposes this input (avoids activating for models
+  // that have the config field but do not expose per_layer_inputs in the ONNX graph).
+  const auto& session_input_names = model_.session_info_.GetInputNames();
+  const bool in_session = std::any_of(session_input_names.begin(), session_input_names.end(),
+                                      [](const std::string& n) { return n == "per_layer_inputs"; });
+  if (!in_session) {
+    return;
+  }
+
+  is_active_ = true;
+
+  // Resolve data type from the session metadata (falls back to model io_dtype).
+  type_ = model_.session_info_.GetInputDataType("per_layer_inputs");
+
+  shape_ = {
+      static_cast<int64_t>(state_.params_->BatchBeamSize()),
+      0,  // sequence_length — updated on first Update() call
+      static_cast<int64_t>(model_.config_->model.decoder.num_hidden_layers),
+      static_cast<int64_t>(hidden_size_per_layer),
+  };
+
+  // Allocate an empty (seq_len=0) placeholder so that the input slot is never null.
+  tensor_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+}
+
+void PerLayerInputs::Add() {
+  if (!is_active_) return;
+
+  index_ = state_.inputs_.size();
+  state_.inputs_.push_back(tensor_.get());
+  state_.input_names_.push_back("per_layer_inputs");
+}
+
+void PerLayerInputs::Update(int seq_length) {
+  if (!is_active_) return;
+
+  if (shape_[1] == seq_length) return;  // Nothing to do — shape unchanged.
+
+  shape_[1] = static_cast<int64_t>(seq_length);
+  tensor_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+  // Zero-initialise the tensor.  The actual per-layer embeddings will come from a dedicated
+  // embed model once that pipeline stage is wired up; until then zeros are safe because no
+  // ONNX node in the current decoder graph consumes this input.
+  // Use size_t for all multiplications to avoid 32-bit intermediate overflow.
+  const size_t num_elements = static_cast<size_t>(shape_[0]) * static_cast<size_t>(shape_[1]) *
+                              static_cast<size_t>(shape_[2]) * static_cast<size_t>(shape_[3]);
+  const size_t num_bytes = num_elements * Ort::SizeOf(type_);
+  std::memset(tensor_->GetTensorMutableRawData(), 0, num_bytes);
+
+  state_.inputs_[index_] = tensor_.get();
+}
+
+void PerLayerInputs::RewindTo(int seq_length) {
+  if (!is_active_) return;
+  // Reallocate and zero-initialise the tensor to the rewound sequence length so that
+  // the state is consistent immediately after a rewind (rather than waiting for the
+  // next Update() call to replace the stale tensor).
+  Update(seq_length);
+}
+
 }  // namespace Generators

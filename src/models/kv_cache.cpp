@@ -213,7 +213,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
+  // Apply per-layer KV cache allocation for all backends when sliding_window config is present with per-layer layer list.
+  // (Previously gated to NvTensorRtRtx only; now extended to CPU/CUDA so that sliding-window layers don't
+  // over-allocate max_length tokens — a significant memory saving for models like Gemma 4.)
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     const int max_length = state_.params_->search.max_length;
@@ -241,6 +244,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         auto it = model_layer_to_cache_slot.find(model_layer_idx);
         if (it != model_layer_to_cache_slot.end()) {
           layer_shapes_[it->second][2] = std::min(max_length, sliding_window_size);
+        } else if (g_log.enabled && g_log.warning) {
+          Log("warning", "sliding_window.layers contains index " + std::to_string(model_layer_idx) +
+                             " which has no corresponding KV cache slot; it will be ignored.");
         }
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
@@ -251,6 +257,42 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
+  }
+
+  // For models with variable head sizes per layer (e.g. Gemma 4 with sliding-window and full-attention
+  // layers using different head dimensions), read the actual KV head_size for each cache slot directly
+  // from the ONNX session info.  This is more robust than inferring head sizes from `attention_pattern`
+  // + `global_head_size` because it correctly handles KV-cache sharing across layers with different
+  // attention types (where a model-layer-index lookup via attention_pattern can miss shared slots
+  // whose model-layer index is ≥ num_unique_kv).
+  const int global_head_size = model_.config_->model.decoder.global_head_size;
+  if (global_head_size > 0) {
+    if (layer_shapes_.empty()) {
+      // No sliding-window layer_shapes_ yet — initialise all slots with the base shape.
+      layer_shapes_.resize(layer_count_);
+      for (int i = 0; i < layer_count_; ++i) {
+        layer_shapes_[i] = shape_;
+      }
+    }
+    // input_name_strings_ interleaves key and value tensors: [key0, val0, key1, val1, ...]
+    // KV tensor shape is [batch, num_kv_heads, seq_len, head_size]; head_size is at index 3.
+    for (int slot = 0; slot < layer_count_; ++slot) {
+      const auto& key_name = input_name_strings_[static_cast<size_t>(slot) * 2];
+      const auto slot_shape = model_.session_info_.GetInputShape(key_name);
+      if (slot_shape.size() == 4 && slot_shape[3] > 0) {
+        layer_shapes_[slot][3] = slot_shape[3];
+      }
+    }
+  }
+
+  // Create per-layer empty pasts when layer shapes have variable head sizes.
+  if (!layer_shapes_.empty()) {
+    empty_pasts_.reserve(layer_count_);
+    for (int i = 0; i < layer_count_; ++i) {
+      auto empty_shape = layer_shapes_[i];
+      empty_shape[2] = 0;  // sequence length = 0 for the initial empty past
+      empty_pasts_.push_back(OrtValue::CreateTensor(Allocator(), empty_shape, type_));
+    }
   }
 
   try {
@@ -286,7 +328,8 @@ void DefaultKeyValueCache::Add() {
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
+    OrtValue* initial_past = empty_pasts_.empty() ? empty_past_.get() : empty_pasts_[i / 2].get();
+    state_.inputs_.push_back(initial_past);  // Set empty past here, Update() takes care of the rest
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -354,7 +397,7 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
   if (index == 0) {
     for (int i = 0; i < layer_count_ * 2; i++) {
       pasts_[i] = nullptr;
-      state_.inputs_[input_index_ + i] = empty_past_.get();
+      state_.inputs_[input_index_ + i] = empty_pasts_.empty() ? empty_past_.get() : empty_pasts_[i / 2].get();
     }
   } else if (type_ == Ort::TypeToTensorType<float>) {
     RewindPastTensorsTo<float>(index);

@@ -39,6 +39,7 @@ struct DecoderOnly_State : State {
   std::unique_ptr<KeyValueCache> kv_cache_;
   std::unique_ptr<RecurrentState> recurrent_state_;
   std::unique_ptr<PositionInputs> position_inputs_;
+  PerLayerInputs per_layer_inputs_{*this};
   ExtraInputs extra_inputs_{*this};
 };
 
