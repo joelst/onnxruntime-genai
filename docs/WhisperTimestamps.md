@@ -69,3 +69,44 @@ VAD policy, seek/redecode behavior, adding each window's absolute offset, and fi
 segment assembly. Word-level cross-attention/DTW timestamps are not provided by this
 feature. Create a fresh generator for each new audio window or redecode attempt; appending
 another window after timestamp generation begins is rejected.
+
+## Completed-window segment prototype
+
+On the prototype branch, `examples/python/whisper.py --timestamps --segments`
+demonstrates consumer-side segment extraction. This is not a library API or an
+implementation of the metadata API proposed in #2591. Use a build containing the
+Whisper timestamp primitives and a timestamp-compatible Whisper model export:
+
+```bash
+python examples/python/whisper.py -m path/to/whisper-tiny-fp32-cpu -e cpu -b 5 \
+  --timestamps --segments
+```
+
+Enter `test/audios/1272-141231-0002.mp3` at the audio-path prompt.
+
+The example emits one JSON record per completed batch/beam hypothesis alongside
+its existing console output. Each record identifies the batch and beam, declares
+`time_reference` as `audio_window`, and contains segments with `text`, `start_time`,
+and `stop_time`. It verifies and removes the decoder prompt before examining the
+generated suffix, including any timestamp tokens used for prompt conditioning.
+
+The extractor supports the standard Whisper vocabulary, where text IDs precede
+the single EOS token and control IDs precede the timestamp-token suffix. It
+requires a separate opening boundary and a later closing boundary for every
+text segment, permits repeated boundaries and gaps between segments, and rejects
+decreasing timestamps, unexpected controls, or unfinished text. A truncated
+hypothesis without a closing boundary raises an error identifying its batch/beam;
+it does not return a partial list or invent an end time. Timestamp-only output
+produces no segments. An empty list is not a silence-detection result.
+
+Only finalized sequences are inspected. There is no assumption that intermediate
+beam hypotheses can be irreversibly accumulated into streaming segments.
+Successful extraction does not establish that all speech in the input was
+transcribed. Window offsets, duration clipping, chunking, and redecode decisions
+remain consumer responsibilities.
+
+This prototype supplies segment text and window-relative seconds, not per-word
+alignment or absolute acoustic-frame bounds. Those are the concrete fields to
+compare with #2591's timestamp result records. Sharing the result envelope remains
+a follow-up design question; this branch adds no dependency on its metadata state,
+Extensions word aggregation, or public bindings.

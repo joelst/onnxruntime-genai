@@ -3,12 +3,15 @@
 
 import argparse
 import glob
+import json
 import os
-import readline
 import re
+import readline
+from dataclasses import asdict
 
 import onnxruntime_genai as og
 from common import register_ep
+from whisper_segments import extract_segments
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
@@ -38,6 +41,21 @@ def _word_error_rate(reference: str, hypothesis: str) -> float:
             )
         previous = current
     return previous[-1] / max(1, len(reference_words))
+
+
+def segment_output(tokenizer, tokens, prompt_tokens, batch_index, beam_index):
+    try:
+        if list(tokens[: len(prompt_tokens)]) != list(prompt_tokens):
+            raise ValueError("The completed sequence does not start with the expected decoder prompt.")
+        segments = extract_segments(tokenizer, tokens[len(prompt_tokens) :])
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"batch {batch_index}, beam {beam_index}: {error}") from error
+    return {
+        "batch_index": batch_index,
+        "beam_index": beam_index,
+        "time_reference": "audio_window",
+        "segments": [asdict(segment) for segment in segments],
+    }
 
 
 def run(args: argparse.Namespace):
@@ -99,7 +117,16 @@ def run(args: argparse.Namespace):
         tokenizer = og.Tokenizer(model)
         for i in range(batch_size * args.num_beams):
             tokens = generator.get_sequence(i)
-            if args.timestamps:
+            if args.segments:
+                output = segment_output(
+                    tokenizer,
+                    tokens.tolist(),
+                    tokenizer.encode(prompts[i // args.num_beams]),
+                    i // args.num_beams,
+                    i % args.num_beams,
+                )
+                print(json.dumps(output, ensure_ascii=False))
+            elif args.timestamps:
                 timestamp_tokens = [int(token) for token in tokens if tokenizer.is_timestamp_token(int(token))]
                 if len(timestamp_tokens) < 2:
                     raise RuntimeError("Timestamp-enabled Whisper output did not contain timestamp boundaries.")
@@ -167,10 +194,17 @@ if __name__ == "__main__":
         help="Enable Whisper timestamp-token generation and validate the generated timestamp sequence.",
     )
     parser.add_argument(
+        "--segments",
+        action="store_true",
+        help="Prototype: extract window-relative segments from each completed hypothesis. Requires --timestamps.",
+    )
+    parser.add_argument(
         "--max_word_error_rate",
         type=float,
         default=None,
         help="Accept a non-interactive transcription when its word error rate is at most this value.",
     )
     args = parser.parse_args()
+    if args.segments and not args.timestamps:
+        parser.error("--segments requires --timestamps.")
     run(args)
